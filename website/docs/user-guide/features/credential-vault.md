@@ -79,6 +79,26 @@ cannot spend. Address fills need no confirmation.
 
 ## Managing what's saved
 
+To import an existing login without typing or displaying its password:
+
+```bash
+chmod 600 /path/to/login.json
+hermes vault import-file /path/to/login.json --origin https://example.com --label "Work"
+```
+
+The file must be a JSON object with non-empty string fields `email` and
+`password`. Use `--identifier-field username` or `--password-field secret`
+for other top-level keys. The default identifier type is email; other
+identifier keys are stored as usernames. Extra fields (including `url` and
+authenticator keys) are ignored. The explicit HTTPS origin controls where
+the login may be filled; paths are normalized to the site origin.
+
+World-readable files and non-HTTPS origins are refused. Success prints only
+the handle, label, site and identifier as JSON. Errors omit source contents
+and exit with status 1. The label defaults to the site origin. Passwords
+overlapping visible metadata are refused to prevent accidental disclosure.
+The source file is left unchanged; repeated imports create separate items.
+
 - **Desktop → Settings → Passwords & Logins**: everything saved, the detected
   password managers with Unlock/Lock, Add, Remove.
 - **CLI**: `hermes vault list`, `hermes vault add`, `hermes vault rm <handle>`,

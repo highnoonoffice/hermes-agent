@@ -17,6 +17,12 @@ server-side without ever seeing it.
 from __future__ import annotations
 
 import getpass
+import json
+import os
+from pathlib import Path
+import stat
+import sys
+from urllib.parse import urlsplit
 
 
 def _console():
@@ -109,6 +115,55 @@ def _cmd_add(args) -> None:
     c.print(f"[green]Stored.[/] handle=[bold]{meta.id}[/] kind={meta.kind} origin={meta.origin or '-'}")
 
 
+def _cmd_import_file(args) -> None:
+    """Read secrets locally; only approved metadata crosses the CLI boundary."""
+    from agent.vault_store import get_vault_store, normalize_origin
+
+    error = "Import failed: origin must be an HTTPS URL without user information."
+    try:
+        parts = urlsplit(args.origin)
+        if parts.scheme != "https" or not parts.hostname or parts.username is not None or parts.password is not None:
+            raise ValueError
+        origin = normalize_origin(args.origin)
+        error = "Import failed: cannot read credentials file."
+        # Check the opened descriptor, not a path that could be swapped before read.
+        fd = os.open(Path(args.path).expanduser(), os.O_RDONLY | os.O_NONBLOCK)
+        with os.fdopen(fd, encoding="utf-8") as source:
+            mode = os.fstat(source.fileno()).st_mode
+            error = "Import failed: use a regular file that is not world-readable (chmod 600)."
+            if not stat.S_ISREG(mode) or mode & stat.S_IROTH:
+                raise ValueError
+            error = "Import failed: credentials file must contain a JSON object."
+            data = json.load(source)
+        if not isinstance(data, dict):
+            raise ValueError
+        error = "Import failed: identifier and password fields must be distinct, non-empty strings."
+        identifier = data.get(args.identifier_field)
+        password = data.get(args.password_field)
+        if (args.identifier_field == args.password_field
+                or not isinstance(identifier, str) or not identifier.strip()
+                or not isinstance(password, str) or not password):
+            raise ValueError
+        label = args.label if args.label is not None else origin
+        # A mistaken field mapping must not promote the password to visible metadata.
+        error = "Import failed: password overlaps visible metadata or label is empty."
+        if not label.strip() or any(password in value for value in (identifier, label, origin)):
+            raise ValueError
+        error = "Import failed: could not save login to the vault."
+        meta = get_vault_store().add_item(
+            kind="login", label=label, origin=origin,
+            secret={"identifier_type": "email" if args.identifier_field == "email" else "username",
+                    "identifier": identifier, "password": password},
+        )
+    except Exception:
+        # Parser, filesystem and storage exceptions can contain source data.
+        # Never render/log the exception or its traceback at this secret boundary.
+        print(error, file=sys.stderr)
+        raise SystemExit(1) from None
+    print(json.dumps({"handle": meta.id, "label": meta.label,
+                      "site": meta.origin, "identifier": meta.identifier}))
+
+
 def _cmd_list(args) -> None:
     """Local items always; external managers only for the lifetime of this CLI process (a
     `hermes vault list` unlock does not carry into a chat session — unlock there when asked)."""
@@ -195,6 +250,14 @@ def register_cli(subparser) -> None:
         help="Item kind (interactive prompt when omitted)",
     )
     p_add.set_defaults(_vault_handler=_cmd_add)
+
+    p_import = subs.add_parser("import-file", help="Import one login from a private JSON file without displaying its password")
+    p_import.add_argument("path", help="JSON credentials file (must not be world-readable)")
+    p_import.add_argument("--origin", required=True, help="HTTPS site URL to bind the login to")
+    p_import.add_argument("--label", help="Visible label (defaults to the site origin)")
+    p_import.add_argument("--identifier-field", default="email", help="Top-level identifier key (default: email)")
+    p_import.add_argument("--password-field", default="password", help="Top-level password key (default: password)")
+    p_import.set_defaults(_vault_handler=_cmd_import_file)
 
     p_list = subs.add_parser("list", help="List vault items (metadata only, never values)")
     p_list.set_defaults(_vault_handler=_cmd_list)
